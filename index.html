@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>文物 WebAR 科普（Hiro Marker Demo）</title>
+
+  <!-- A-Frame -->
+  <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
+  <!-- AR.js NFT 版 -->
+  <script src="https://cdn.jsdelivr.net/gh/AR-js-org/AR.js@3.4.2/aframe/build/aframe-ar-nft.js"></script>
+
+  <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+  <!-- AR 场景 -->
+  <a-scene
+    embedded
+    renderer="logarithmicDepthBuffer: true"
+    arjs="trackingMethod: best; sourceType: webcam; debugUIEnabled: false;">
+
+    <!-- 统一在 a-assets 中声明模型，避免路径/缓存问题 -->
+    <a-assets timeout="20000">
+      <a-asset-item id="artifactGLB" src="assets/models/artifact.glb"></a-asset-item>
+    </a-assets>
+
+    <!-- 摄像机 -->
+    <a-entity camera></a-entity>
+
+    <!-- Hiro 识别目标 -->
+    <a-marker preset="hiro" emitevents="true">
+      <!-- 卡通写实青铜器模型（占位） -->
+      <a-entity
+        id="artifactModel"
+        gltf-model="#artifactGLB"
+        scale="0.2 0.2 0.2"
+        position="0 0 0"
+        rotation="0 180 0"
+        animation-mixer>
+      </a-entity>
+
+      <!-- 辅助几何体，便于确认对齐 -->
+      <a-ring color="#62d5ff" radius-inner="0.45" radius-outer="0.5" rotation="-90 0 0"></a-ring>
+    </a-marker>
+
+    <!-- 灯光 -->
+    <a-entity light="type: ambient; intensity: 1"></a-entity>
+    <a-entity light="type: directional; intensity: 0.6" position="1 2 1"></a-entity>
+  </a-scene>
+
+  <!-- 信息与配置面板（替代原聊天功能） -->
+  <div id="info-ui">
+    <div id="log"><em>请将摄像头对准 Hiro 测试图即可加载模型。</em></div>
+
+    <div id="config-doc">
+      <h3>配置说明</h3>
+      <p>要修改展示模型，请编辑：<code>assets/models/artifact.glb</code> 或替换为你自己的模型，并调整下列属性：</p>
+      <ul>
+        <li><strong>模型路径：</strong>修改 <code>&lt;a-asset-item id="artifactGLB" src="..."&gt;</code> 的 <code>src</code> 属性。</li>
+        <li><strong>缩放：</strong>在 <code>&lt;a-entity id="artifactModel" scale="..."&gt;</code> 中修改 <code>scale</code>（建议小于1 的值）。</li>
+        <li><strong>位置：</strong>通过 <code>position="x y z"</code> 调整模型在 marker 上的基准位置。</li>
+        <li><strong>初始旋转：</strong>通过 <code>rotation="x y z"</code> 设置初始方向（角度，单位：度）。</li>
+        <li><strong>本地调试：</strong>最好在 <code>http://localhost</code> 或通过 HTTPS 下打开页面以获取摄像头权限。</li>
+      </ul>
+      <p>示例：将模型放大 0.2 倍并沿 Z 轴旋转 180 度：
+        <code>scale="0.2 0.2 0.2" rotation="0 180 0"</code>
+      </p>
+      <p><strong>可通过配置文件：</strong>你也可以在同目录下创建一个 <code>config.json</code> 来设置模型的 <code>scale</code>、<code>position</code> 和 <code>rotation</code>，例如下文所示。页面会优先使用 <code>config.json</code> 中的值。</p>
+    </div>
+
+    <div id="controls">
+      <label><input type="checkbox" id="autoRotate" checked> 自动旋转模型（Marker 识别时生效）</label>
+      <button id="resetView">重置视图</button>
+    </div>
+  </div>
+
+  <!-- 摄像头授权提醒 -->
+  <div id="camera-alert" class="camera-alert hidden">
+    <h2>无法启用摄像头</h2>
+    <p id="camera-alert-msg">请允许浏览器使用摄像头，并确保通过 localhost 或 HTTPS 访问。</p>
+    <button id="retryCamera">重新检测</button>
+  </div>
+
+  <script>
+    // 小幅 UI 行为：当 markerFound/markerLost 发生时，更新提示
+    const scene = document.querySelector('a-scene');
+    scene.addEventListener('markerFound', () => {
+      const log = document.getElementById('log');
+      log.innerHTML += '<div class="event">已识别 Hiro marker，模型已显示。</div>';
+      log.scrollTop = log.scrollHeight;
+    });
+    scene.addEventListener('markerLost', () => {
+      const log = document.getElementById('log');
+      log.innerHTML += '<div class="event">Hiro marker 丢失，模型隐藏。</div>';
+      log.scrollTop = log.scrollHeight;
+    });
+
+    // 捕获模型加载结果，帮助定位路径/格式问题
+    const modelEl = document.getElementById('artifactModel');
+    modelEl.addEventListener('model-loaded', () => {
+      const log = document.getElementById('log');
+      log.innerHTML += '<div class="event">模型已成功加载。</div>';
+      log.scrollTop = log.scrollHeight;
+      // When the GLTF has loaded, re-apply config values directly to object3D
+      applyModelConfigToObject3D();
+    });
+    modelEl.addEventListener('model-error', (evt) => {
+      const log = document.getElementById('log');
+      log.innerHTML += '<div class="event">模型加载失败：' + (evt.detail?.src || '请检查路径/格式') + '</div>';
+      log.scrollTop = log.scrollHeight;
+    });
+
+    // --- 配置文件加载：支持 config.json 中的 model.scale/model.position/model.rotation ---
+    let modelConfig = null;
+    async function loadModelConfig() {
+      try {
+        const resp = await fetch('config.json', { cache: 'no-cache' });
+        if (!resp.ok) return; // no config present
+        modelConfig = await resp.json();
+        applyModelConfig();
+      } catch (e) {
+        // ignore if no config or parse error
+        console.warn('config.json not found or invalid', e);
+        modelConfig = null;
+      }
+    }
+
+    function applyModelConfig() {
+      if (!modelConfig || !modelConfig.model) return;
+      const m = modelConfig.model;
+
+      if (m.scale) {
+        const s = Array.isArray(m.scale) ? m.scale.join(' ') : String(m.scale);
+        modelEl.setAttribute('scale', s);
+        modelEl.dataset.configScale = JSON.stringify(Array.isArray(m.scale) ? m.scale : s.split(/\s+/).map(Number));
+      }
+
+      if (m.position) {
+        const p = Array.isArray(m.position) ? m.position.join(' ') : String(m.position);
+        modelEl.setAttribute('position', p);
+        modelEl.dataset.configPosition = JSON.stringify(Array.isArray(m.position) ? m.position : p.split(/\s+/).map(Number));
+      }
+
+      if (m.rotation) {
+        const r = Array.isArray(m.rotation) ? m.rotation.join(' ') : String(m.rotation);
+        modelEl.setAttribute('rotation', r);
+        modelEl.dataset.configRotation = JSON.stringify(Array.isArray(m.rotation) ? m.rotation : r.split(/\s+/).map(Number));
+      }
+
+      // optional rotate speed / autoRotate override
+      if (m.autoRotate !== undefined) {
+        const autoCheckbox = document.getElementById('autoRotate');
+        if (autoCheckbox) autoCheckbox.checked = !!m.autoRotate;
+      }
+      if (m.rotateSpeed !== undefined) {
+        // store speed for use by rotation loop (attach to dataset)
+        modelEl.dataset.rotateSpeed = String(m.rotateSpeed);
+      }
+    }
+
+    // Apply config directly to the loaded three.js object (if present)
+    function applyModelConfigToObject3D() {
+      if (!modelConfig || !modelConfig.model) return;
+      const m = modelConfig.model;
+      try {
+        if (modelEl && modelEl.object3D) {
+          // scale
+          if (m.scale) {
+            const sArr = Array.isArray(m.scale) ? m.scale : String(m.scale).split(/\s+/).map(Number);
+            modelEl.object3D.scale.set(sArr[0] || 1, sArr[1] || 1, sArr[2] || 1);
+          }
+          // position
+          if (m.position) {
+            const pArr = Array.isArray(m.position) ? m.position : String(m.position).split(/\s+/).map(Number);
+            modelEl.object3D.position.set(pArr[0] || 0, pArr[1] || 0, pArr[2] || 0);
+          }
+          // rotation (degrees -> radians)
+          if (m.rotation) {
+            const rArr = Array.isArray(m.rotation) ? m.rotation : String(m.rotation).split(/\s+/).map(Number);
+            modelEl.object3D.rotation.set(
+              THREE.Math.degToRad(rArr[0] || 0),
+              THREE.Math.degToRad(rArr[1] || 0),
+              THREE.Math.degToRad(rArr[2] || 0)
+            );
+          }
+        }
+      } catch (e) {
+        console.warn('applyModelConfigToObject3D failed', e);
+      }
+    }
+
+    // load config immediately (non-blocking)
+    loadModelConfig();
+
+    // --- 模型自动旋转功能 ---
+    (function() {
+      const autoRotateCheckbox = document.getElementById('autoRotate');
+      const resetViewBtn = document.getElementById('resetView');
+      const marker = document.querySelector('a-marker[preset="hiro"]');
+
+      let rotateEnabled = autoRotateCheckbox ? autoRotateCheckbox.checked : true;
+      let rotating = false;
+      let rafId = null;
+      const speed = 0.6; // degrees per frame-ish (tweakable)
+
+      function startRotate() {
+        if (!rotateEnabled || rotating) return;
+        rotating = true;
+        rotateLoop();
+      }
+
+      function stopRotate() {
+        rotating = false;
+        if (rafId) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+      }
+
+      function rotateLoop() {
+        if (!rotating) return;
+        try {
+          // work on the A-Frame entity's three.js object3D
+              if (modelEl && modelEl.object3D) {
+                // Prefer rotateSpeed from config if present
+                const cfgSpeed = parseFloat(modelEl.dataset.rotateSpeed || modelConfig?.model?.rotateSpeed || speed);
+                modelEl.object3D.rotation.y += (cfgSpeed * Math.PI / 180) * 0.5;
+              }
+        } catch (e) {
+          // ignore until model is ready
+        }
+        rafId = requestAnimationFrame(rotateLoop);
+      }
+
+      if (autoRotateCheckbox) {
+        autoRotateCheckbox.addEventListener('change', () => {
+          rotateEnabled = autoRotateCheckbox.checked;
+          if (!rotateEnabled) stopRotate();
+        });
+      }
+
+      // start rotation when marker found, stop when lost
+      if (marker) {
+        marker.addEventListener('markerFound', () => {
+          if (rotateEnabled) startRotate();
+        });
+        marker.addEventListener('markerLost', () => {
+          stopRotate();
+        });
+      }
+
+      // reset view restores rotation/position to attributes
+      if (resetViewBtn) {
+        resetViewBtn.addEventListener('click', () => {
+          if (modelEl) {
+            // Prefer config values if present, otherwise use current attribute values
+            if (modelEl.dataset.configRotation) {
+              try {
+                const cfgR = JSON.parse(modelEl.dataset.configRotation);
+                modelEl.object3D.rotation.set(
+                  THREE.Math.degToRad(cfgR[0] || 0),
+                  THREE.Math.degToRad(cfgR[1] || 0),
+                  THREE.Math.degToRad(cfgR[2] || 0)
+                );
+              } catch (e) {
+                // fallback
+                const rotAttr = modelEl.getAttribute('rotation') || { x:0, y:0, z:0 };
+                modelEl.object3D.rotation.set(
+                  THREE.Math.degToRad(rotAttr.x || 0),
+                  THREE.Math.degToRad(rotAttr.y || 0),
+                  THREE.Math.degToRad(rotAttr.z || 0)
+                );
+              }
+            } else {
+              const rotAttr = modelEl.getAttribute('rotation') || { x:0, y:0, z:0 };
+              modelEl.object3D.rotation.set(
+                THREE.Math.degToRad(rotAttr.x || 0),
+                THREE.Math.degToRad(rotAttr.y || 0),
+                THREE.Math.degToRad(rotAttr.z || 0)
+              );
+            }
+            // restore scale/position from config if available
+            if (modelEl.dataset.configScale) {
+              try {
+                const cfgS = JSON.parse(modelEl.dataset.configScale);
+                modelEl.object3D.scale.set(cfgS[0] || 1, cfgS[1] || 1, cfgS[2] || 1);
+              } catch (e) {}
+            }
+            if (modelEl.dataset.configPosition) {
+              try {
+                const cfgP = JSON.parse(modelEl.dataset.configPosition);
+                modelEl.object3D.position.set(cfgP[0] || 0, cfgP[1] || 0, cfgP[2] || 0);
+              } catch (e) {}
+            }
+          }
+        });
+      }
+    })();
+
+    // 摄像头权限监控
+    const cameraAlert = document.getElementById('camera-alert');
+    const cameraAlertMsg = document.getElementById('camera-alert-msg');
+    const retryCameraBtn = document.getElementById('retryCamera');
+    const isSecureContext = window.isSecureContext;
+    const isLocalhost = ['localhost', '127.0.0.1', '::1'].includes(location.hostname);
+
+    async function verifyCamera(manualTrigger = false) {
+      if (!isSecureContext && !isLocalhost) {
+        cameraAlertMsg.textContent = '非 HTTPS 环境无法启用摄像头，请使用 https:// 或本地 localhost 预览。';
+        cameraAlert.classList.remove('hidden');
+        return;
+      }
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        cameraAlertMsg.textContent = '当前浏览器不支持 WebRTC 摄像头，请更换 Chrome/Edge/Firefox。';
+        cameraAlert.classList.remove('hidden');
+        return;
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        stream.getTracks().forEach(track => track.stop());
+        cameraAlert.classList.add('hidden');
+        if (manualTrigger) {
+          const log = document.getElementById('log');
+          log.innerHTML += '<div class="event">摄像头已重新授权。</div>';
+          log.scrollTop = log.scrollHeight;
+        }
+      } catch (err) {
+        if (err.name === 'NotAllowedError') {
+          cameraAlertMsg.textContent = '你拒绝了摄像头权限，请点击地址栏锁图标重新允许后再试。';
+        } else if (err.name === 'NotFoundError' || err.name === 'NotReadableError') {
+          cameraAlertMsg.textContent = '未检测到可用摄像头或被其他程序占用，请确认设备连接。';
+        } else {
+          cameraAlertMsg.textContent = '无法访问摄像头：' + err.message;
+        }
+        cameraAlert.classList.remove('hidden');
+      }
+    }
+
+    retryCameraBtn.addEventListener('click', () => verifyCamera(true));
+    verifyCamera(false);
+  </script>
+</body>
+</html>

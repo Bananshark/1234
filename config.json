@@ -1,0 +1,9 @@
+{
+  "model": {
+    "scale": [0.9, 0.9, 0.9],
+    "position": [0, 0, 0],
+    "rotation": [0, 180, 0],
+    "autoRotate": true,
+    "rotateSpeed": 0.6
+  }
+}
